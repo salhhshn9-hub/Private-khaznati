@@ -1,7 +1,21 @@
 import React, { useMemo, useState } from 'react';
-import { Calendar, Check, Copy, Eye, EyeOff, Link2, Mail, Plus, ShieldCheck } from 'lucide-react';
+import {
+  Calendar,
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  FileSpreadsheet,
+  Globe,
+  Link2,
+  Mail,
+  Plus,
+  Search,
+  ShieldCheck,
+} from 'lucide-react';
 import { VaultAccount } from '../types/vault';
 import {
+  SITE_SIGNUP_METHOD_LABELS,
   calculateAccountDuration,
   calculateAgeFromBirthdate,
   formatReadableDate,
@@ -12,17 +26,22 @@ interface IdentityGraphViewProps {
   accounts: VaultAccount[];
   onSelectAccount: (acc: VaultAccount) => void;
   onAddLinkedApp: (parentEmail: VaultAccount) => void;
+  onManageSites: (parentAccount: VaultAccount) => void;
   onAddNewEmail: () => void;
+  onExportEmailTree?: (email: VaultAccount, linkedApps: VaultAccount[]) => void;
 }
 
 export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
   accounts,
   onSelectAccount,
   onAddLinkedApp,
+  onManageSites,
   onAddNewEmail,
+  onExportEmailTree,
 }) => {
   const [revealedIds, setRevealedIds] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [treeSearch, setTreeSearch] = useState('');
 
   const { emailTrees, standaloneApps } = useMemo(() => {
     const emails = accounts.filter((a) => a.recordType === 'email');
@@ -54,14 +73,35 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
       }
     }
 
-    return {
-      emailTrees: emails.map((email) => ({
-        email,
-        apps: childrenByEmailId.get(email.id) || [],
-      })),
-      standaloneApps: unlinked,
+    const q = treeSearch.trim().toLowerCase();
+    const matchesAccount = (acc: VaultAccount) => {
+      const sitesText = (acc.registeredSites || [])
+        .map((s) => `${s.name} ${s.url} ${s.username} ${s.notes}`)
+        .join(' ');
+      return `${acc.title} ${acc.emailAddress} ${acc.username} ${acc.accountRegion} ${sitesText}`
+        .toLowerCase()
+        .includes(q);
     };
-  }, [accounts]);
+
+    const allTrees = emails.map((email) => ({
+      email,
+      apps: childrenByEmailId.get(email.id) || [],
+    }));
+
+    const filteredTrees = !q
+      ? allTrees
+      : allTrees.filter(
+          ({ email, apps: childApps }) =>
+            matchesAccount(email) || childApps.some((c) => matchesAccount(c))
+        );
+
+    const filteredStandalone = !q ? unlinked : unlinked.filter(matchesAccount);
+
+    return {
+      emailTrees: filteredTrees,
+      standaloneApps: filteredStandalone,
+    };
+  }, [accounts, treeSearch]);
 
   const copyText = (val: string, key: string) => {
     if (!val) return;
@@ -70,14 +110,14 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
     setTimeout(() => setCopiedId((c) => (c === key ? null : c)), 1500);
   };
 
-  if (emailTrees.length === 0 && standaloneApps.length === 0) {
+  if (accounts.length === 0) {
     return (
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-12 text-center space-y-4">
         <Mail className="w-10 h-10 text-slate-400 mx-auto" />
         <div className="space-y-1">
           <h3 className="text-base font-semibold">لا توجد هويات بريدية مسجلة بعد</h3>
           <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-            ابدأ بإضافة بريدك الإلكتروني الأساسي، ثم اربط تحته تطبيقاتك مثل إنستقرام وفيسبوك لتظهر هنا في خريطة مترابطة.
+            ابدأ بإضافة بريدك الإلكتروني الأساسي، ثم أضف تحته جميع المواقع والتطبيقات التي أنشأتها به لتظهر هنا في خريطة مترابطة.
           </p>
         </div>
         <button
@@ -96,19 +136,33 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-lg font-bold">خريطة الإيميلات والتطبيقات المرتبطة</h2>
+          <h2 className="text-lg font-bold">خريطة الإيميلات والمواقع والتطبيقات المرتبطة</h2>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            كل بريد إلكتروني في رأس المجموعة مع جميع التطبيقات والمواقع المسجلة به وتواريخها الخاصة
+            استعرض كل بريد إلكتروني مع كامل التطبيقات والمواقع التي أنشأتها به وتواريخها الخاصة
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onAddNewEmail}
-          className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>إضافة بريد رئيسي جديد</span>
-        </button>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={treeSearch}
+              onChange={(e) => setTreeSearch(e.target.value)}
+              placeholder="ابحث عن إيميل أو موقع مرتبط..."
+              className="pr-9 pl-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 w-60 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={onAddNewEmail}
+            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>إضافة بريد رئيسي جديد</span>
+          </button>
+        </div>
       </div>
 
       <div className="space-y-6">
@@ -116,6 +170,8 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
           const emailOpen = Boolean(revealedIds[email.id]);
           const emailAge = calculateAgeFromBirthdate(email.registeredBirthdate);
           const emailDuration = calculateAccountDuration(email.accountCreatedAt);
+          const sites = email.registeredSites || [];
+          const totalConnected = apps.length + sites.length;
 
           return (
             <div
@@ -157,22 +213,30 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
                       <span className="inline-flex items-center gap-1">
                         <Calendar className="w-3.5 h-3.5" />
                         <span>
-                          تاريخ الميلاد: <strong className="font-mono text-slate-700 dark:text-slate-200">{formatReadableDate(email.registeredBirthdate)}</strong>
+                          تاريخ الميلاد:{' '}
+                          <strong className="font-mono text-slate-700 dark:text-slate-200">
+                            {formatReadableDate(email.registeredBirthdate)}
+                          </strong>
                           {emailAge !== null ? ` (${emailAge} سنة)` : ''}
                         </span>
                       </span>
                       <span aria-hidden="true">·</span>
                       <span>
-                        تاريخ الإنشاء: <strong className="font-mono text-slate-700 dark:text-slate-200">{formatReadableDate(email.accountCreatedAt)}</strong>
+                        تاريخ الإنشاء:{' '}
+                        <strong className="font-mono text-slate-700 dark:text-slate-200">
+                          {formatReadableDate(email.accountCreatedAt)}
+                        </strong>
                         {emailDuration ? ` (${emailDuration.label})` : ''}
                       </span>
                       <span aria-hidden="true">·</span>
-                      <span>{apps.length} تطبيقات مرتبطة</span>
+                      <span>
+                        {totalConnected} مواقع وتطبيقات مرتبطة
+                      </span>
                     </div>
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   {email.password && (
                     <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
                       <span className="text-xs font-mono" dir="ltr">
@@ -203,6 +267,27 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
                     </div>
                   )}
 
+                  {onExportEmailTree && (
+                    <button
+                      type="button"
+                      onClick={() => onExportEmailTree(email, apps)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      title="تصدير هذا البريد وكل المواقع والتطبيقات التي بداخله وكلمات مرورها إلى ملف Excel"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      <span>تصدير الشجرة لـ Excel</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => onManageSites(email)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Globe className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                    <span>إضافة / إدارة المواقع</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => onAddLinkedApp(email)}
@@ -214,17 +299,26 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
                 </div>
               </div>
 
-              {/* Connected Apps Table */}
-              {apps.length === 0 ? (
-                <div className="px-6 py-5 text-xs text-slate-500 dark:text-slate-400 flex items-center justify-between">
-                  <span>لا توجد تطبيقات مرتبطة بهذا البريد حالياً.</span>
-                  <button
-                    type="button"
-                    onClick={() => onAddLinkedApp(email)}
-                    className="text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
-                  >
-                    أضف أول تطبيق الآن
-                  </button>
+              {/* Connected Apps & Sites Table */}
+              {totalConnected === 0 ? (
+                <div className="px-6 py-5 text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center justify-between gap-2">
+                  <span>لا توجد تطبيقات أو مواقع مسجّلة بهذا البريد حالياً.</span>
+                  <div className="flex items-center gap-4">
+                    <button
+                      type="button"
+                      onClick={() => onManageSites(email)}
+                      className="text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                    >
+                      إضافة مواقع أنشأتها بهذا البريد
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onAddLinkedApp(email)}
+                      className="text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                    >
+                      أو ربط تطبيق مستقل
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -232,11 +326,11 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
                     <thead>
                       <tr className="border-b border-slate-100 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
                         <th className="py-2.5 px-5 font-medium">التطبيق / الموقع</th>
+                        <th className="py-2.5 px-4 font-medium">نوع الربط / الدخول</th>
                         <th className="py-2.5 px-4 font-medium">اسم المستخدم</th>
                         <th className="py-2.5 px-4 font-medium">كلمة المرور</th>
-                        <th className="py-2.5 px-4 font-medium">تاريخ الميلاد بالحساب</th>
-                        <th className="py-2.5 px-4 font-medium">تاريخ الإنشاء</th>
-                        <th className="py-2.5 px-5 font-medium text-left">الحماية</th>
+                        <th className="py-2.5 px-4 font-medium">تاريخ الميلاد</th>
+                        <th className="py-2.5 px-5 font-medium text-left">تاريخ الإنشاء / الحماية</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80 text-sm">
@@ -266,11 +360,12 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
                                 <span className="whitespace-nowrap">{app.title}</span>
                               </button>
                             </td>
+                            <td className="py-3 px-4 text-xs text-slate-500 dark:text-slate-400">
+                              سجل تطبيق كامل
+                            </td>
                             <td className="py-3 px-4 font-mono text-xs text-slate-700 dark:text-slate-300" dir="ltr">
                               <div className="flex items-center justify-end gap-1.5">
-                                <span className="truncate max-w-[160px]">
-                                  {app.username || '—'}
-                                </span>
+                                <span className="truncate max-w-[150px]">{app.username || '—'}</span>
                                 {app.username && (
                                   <button
                                     type="button"
@@ -299,11 +394,7 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
                                     className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
                                     aria-label="إظهار كلمة المرور"
                                   >
-                                    {open ? (
-                                      <EyeOff className="w-3.5 h-3.5" />
-                                    ) : (
-                                      <Eye className="w-3.5 h-3.5" />
-                                    )}
+                                    {open ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                                   </button>
                                   <button
                                     type="button"
@@ -333,18 +424,100 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
                                 {formatReadableDate(app.registeredBirthdate)}
                               </span>
                             </td>
-                            <td className="py-3 px-4 text-xs font-mono tabular-nums text-slate-700 dark:text-slate-300" dir="ltr">
-                              {formatReadableDate(app.accountCreatedAt)}
-                            </td>
                             <td className="py-3 px-5 text-left text-xs">
-                              {app.twoFactorEnabled ? (
-                                <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                                  <ShieldCheck className="w-3.5 h-3.5" />
-                                  <span>2FA</span>
+                              <div className="inline-flex items-center gap-2 tabular-nums">
+                                <span className="font-mono text-slate-600 dark:text-slate-400" dir="ltr">
+                                  {formatReadableDate(app.accountCreatedAt)}
                                 </span>
+                                {app.twoFactorEnabled && (
+                                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+
+                      {sites.map((site) => {
+                        const siteOpen = Boolean(revealedIds[`site_${site.id}`]);
+                        const birthDiffers =
+                          email.registeredBirthdate &&
+                          site.registeredBirthdate &&
+                          email.registeredBirthdate !== site.registeredBirthdate;
+
+                        return (
+                          <tr
+                            key={site.id}
+                            onClick={() => onSelectAccount(email)}
+                            className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors cursor-pointer"
+                          >
+                            <td className="py-3 px-5">
+                              <div className="flex items-center gap-2.5 font-medium">
+                                <PlatformIcon
+                                  platformKey={site.platformKey}
+                                  recordType="app"
+                                  size="sm"
+                                />
+                                <span className="whitespace-nowrap">{site.name}</span>
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 text-xs text-indigo-600 dark:text-indigo-400">
+                              {SITE_SIGNUP_METHOD_LABELS[site.signupMethod]}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-xs text-slate-700 dark:text-slate-300" dir="ltr">
+                              {site.username || '—'}
+                            </td>
+                            <td
+                              className="py-3 px-4 font-mono text-xs"
+                              dir="ltr"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {site.password ? (
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <span>{siteOpen ? site.password : '••••••••'}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setRevealedIds((p) => ({
+                                        ...p,
+                                        [`site_${site.id}`]: !siteOpen,
+                                      }))
+                                    }
+                                    className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                                    aria-label="إظهار كلمة المرور"
+                                  >
+                                    {siteOpen ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => copyText(site.password, `sp_${site.id}`)}
+                                    className="text-slate-400 hover:text-indigo-600 cursor-pointer"
+                                    aria-label="نسخ"
+                                  >
+                                    {copiedId === `sp_${site.id}` ? (
+                                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                    ) : (
+                                      <Copy className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+                                </div>
                               ) : (
-                                <span className="text-slate-400">بدون 2FA</span>
+                                <span className="text-slate-400">مرتبط بالحساب</span>
                               )}
+                            </td>
+                            <td className="py-3 px-4 text-xs font-mono tabular-nums" dir="ltr">
+                              <span
+                                className={
+                                  birthDiffers
+                                    ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                                    : 'text-slate-700 dark:text-slate-300'
+                                }
+                              >
+                                {formatReadableDate(site.registeredBirthdate)}
+                              </span>
+                            </td>
+                            <td className="py-3 px-5 text-left text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400" dir="ltr">
+                              {formatReadableDate(site.createdAtDate)}
                             </td>
                           </tr>
                         );
@@ -375,7 +548,14 @@ export const IdentityGraphView: React.FC<IdentityGraphViewProps> = ({
                   <div className="flex items-center gap-3 min-w-0">
                     <PlatformIcon platformKey={app.platformKey} recordType="app" size="sm" />
                     <div className="min-w-0">
-                      <p className="text-sm font-medium truncate">{app.title}</p>
+                      <p className="text-sm font-medium truncate">
+                        {app.title}
+                        {(app.registeredSites?.length || 0) > 0 && (
+                          <span className="text-xs font-normal text-indigo-600 dark:text-indigo-400 mr-2">
+                            · {app.registeredSites.length} مواقع فرعية
+                          </span>
+                        )}
+                      </p>
                       <p className="text-xs font-mono text-slate-500 truncate" dir="ltr">
                         {app.emailAddress || app.username || 'بدون بريد'}
                       </p>

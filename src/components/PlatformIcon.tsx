@@ -1,15 +1,17 @@
 import React from 'react';
 import {
+  Bot,
   Building2,
   CreditCard,
   Gamepad2,
   Globe,
   Mail,
+  MessageCircle,
   Music,
+  Palette,
   Play,
   Shield,
   ShoppingBag,
-  Sparkles,
 } from 'lucide-react';
 import { getPresetByKey } from '../utils/vaultHelpers';
 import { RecordType } from '../types/vault';
@@ -44,19 +46,42 @@ export const PlatformIcon: React.FC<PlatformIconProps> = ({
         return <Mail className="w-4 h-4" />;
       case 'youtube':
       case 'netflix':
+      case 'shahid':
+      case 'osn':
+      case 'twitch':
         return <Play className="w-4 h-4" />;
       case 'spotify':
+      case 'anghami':
         return <Music className="w-4 h-4" />;
       case 'steam':
       case 'playstation':
+      case 'xbox':
       case 'discord':
+      case 'epic':
+      case 'roblox':
         return <Gamepad2 className="w-4 h-4" />;
       case 'amazon':
+      case 'noon':
+      case 'shein':
+      case 'aliexpress':
+      case 'hungerstation':
+      case 'jahez':
         return <ShoppingBag className="w-4 h-4" />;
       case 'bank':
+      case 'paypal':
+      case 'stcpay':
         return <CreditCard className="w-4 h-4" />;
       case 'absher':
         return <Building2 className="w-4 h-4" />;
+      case 'chatgpt':
+        return <Bot className="w-4 h-4" />;
+      case 'canva':
+      case 'adobe':
+      case 'figma':
+        return <Palette className="w-4 h-4" />;
+      case 'whatsapp':
+      case 'telegram':
+        return <MessageCircle className="w-4 h-4" />;
       case 'apple':
       case 'github':
         return <Shield className="w-4 h-4" />;
@@ -75,7 +100,6 @@ export const PlatformIcon: React.FC<PlatformIconProps> = ({
     }
   };
 
-  // Use clean subtle tinted surface + crisp border without flashy gradients
   return (
     <div
       className={`${dims} rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800/80 flex items-center justify-center shrink-0 font-medium`}
@@ -87,7 +111,12 @@ export const PlatformIcon: React.FC<PlatformIconProps> = ({
       platformKey === 'x' ||
       platformKey === 'tiktok' ||
       platformKey === 'snapchat' ||
-      platformKey === 'linkedin' ? (
+      platformKey === 'threads' ||
+      platformKey === 'reddit' ||
+      platformKey === 'linkedin' ||
+      platformKey === 'notion' ||
+      platformKey === 'uber' ||
+      platformKey === 'booking' ? (
         <span className="font-mono font-semibold tracking-tight text-slate-800 dark:text-slate-100">
           {preset.shortCode}
         </span>
@@ -97,6 +126,3 @@ export const PlatformIcon: React.FC<PlatformIconProps> = ({
     </div>
   );
 };
-
-// Keep Sparkles unused import warning away if not needed
-void Sparkles;

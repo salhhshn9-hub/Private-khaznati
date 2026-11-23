@@ -1,14 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Calendar,
   Check,
+  CheckSquare,
   Copy,
+  CreditCard,
   Database,
   Eye,
   EyeOff,
+  FileSpreadsheet,
+  Globe,
   KeyRound,
   LayoutGrid,
   Link2,
+  List,
   Lock,
   LogOut,
   Mail,
@@ -17,25 +23,35 @@ import {
   Plus,
   Search,
   Settings,
+  Shield,
   ShieldAlert,
   ShieldCheck,
+  Square,
   Star,
   Sun,
+  Timer,
+  Trash2,
   X,
 } from 'lucide-react';
 import {
   AccountCategory,
+  RegisteredSiteItem,
   VaultAccount,
   VaultAccountDraft,
   VaultPreferences,
 } from './types/vault';
 import {
   CATEGORY_LABELS,
+  analyzePasswordRisks,
   buildVaultAuditReport,
   calculateAccountDuration,
+  createEmptyAccountDraft,
   createSampleAccountsForUser,
+  evaluatePasswordStrength,
   formatReadableDate,
   generateSafeId,
+  getAccountFieldCompleteness,
+  getAccountNeedsAttention,
   sanitizeAccountPayload,
   sanitizePreferencesPayload,
 } from './utils/vaultHelpers';
@@ -53,17 +69,33 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthScreen } from './components/AuthScreen';
 import { VaultLockScreen } from './components/VaultLockScreen';
 import { PlatformIcon } from './components/PlatformIcon';
-import { AccountModal } from './components/AccountModal';
+import { AccountModal, ModalTab } from './components/AccountModal';
 import { AccountDetailDrawer } from './components/AccountDetailDrawer';
 import { IdentityGraphView } from './components/IdentityGraphView';
+import { SitesDirectoryView } from './components/SitesDirectoryView';
+import { SubscriptionsView } from './components/SubscriptionsView';
 import { DatesTimelineView } from './components/DatesTimelineView';
 import { SecurityAuditView } from './components/SecurityAuditView';
 import { PasswordGeneratorView } from './components/PasswordGeneratorView';
+import { AuthenticatorHubView } from './components/AuthenticatorHubView';
 import { SettingsView } from './components/SettingsView';
+import { CommandPalette } from './components/CommandPalette';
+import { ExcelExportModal } from './components/ExcelExportModal';
 import { OfflineIndicator } from './components/PWAInstallButton';
 
-type ActiveSection = 'all' | 'graph' | 'dates' | 'audit' | 'generator' | 'settings';
-type RecordFilter = 'all' | 'email' | 'app' | 'favorites';
+type ActiveSection =
+  | 'all'
+  | 'sites'
+  | 'graph'
+  | 'totp'
+  | 'dates'
+  | 'subscriptions'
+  | 'audit'
+  | 'generator'
+  | 'settings';
+type RecordFilter = 'all' | 'email' | 'app' | 'favorites' | 'attention';
+type SortOption = 'updated' | 'created_newest' | 'created_oldest' | 'title' | 'completeness';
+type ViewMode = 'cards' | 'table';
 
 function VaultApp() {
   const [user, setUser] = useState<LocalUserSession | null>(() => getSavedSession());
@@ -81,6 +113,7 @@ function VaultApp() {
     realBirthdate: '',
     vaultPinHash: '',
     autoLockMinutes: 15,
+    clipboardClearSeconds: 30,
     theme: 'light',
   });
   const [isLocked, setIsLocked] = useState(false);
@@ -96,8 +129,24 @@ function VaultApp() {
   const [searchQuery, setSearchQuery] = useState('');
   const [recordFilter, setRecordFilter] = useState<RecordFilter>('all');
   const [categoryFilter, setCategoryFilter] = useState<'all' | AccountCategory>('all');
+  const [sortBy, setSortBy] = useState<SortOption>('updated');
+  const [viewMode, setViewMode] = useState<ViewMode>('cards');
+  const [privacyMode, setPrivacyMode] = useState(false);
+
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [excelModalOpen, setExcelModalOpen] = useState(false);
+  const [excelScope, setExcelScope] = useState<{
+    accounts: VaultAccount[];
+    scopeLabel?: string;
+    customFileSuffix?: string;
+  } | null>(null);
+
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [modalInitialTab, setModalInitialTab] = useState<ModalTab>('identity');
   const [editingAccount, setEditingAccount] = useState<VaultAccount | null>(null);
   const [draftOverrides, setDraftOverrides] = useState<Partial<VaultAccountDraft> | undefined>(
     undefined
@@ -108,7 +157,26 @@ function VaultApp() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [seedingDemo, setSeedingDemo] = useState(false);
 
+  // Global Clipboard Auto-Clear State
+  const [clipboardTimer, setClipboardTimer] = useState<{
+    secondsLeft: number;
+    label: string;
+  } | null>(null);
+
   const initialLockCheckedRef = useRef(false);
+
+  // Global Ctrl+K / Cmd+K Quick Search Shortcut
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!user || isLocked) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [user, isLocked]);
 
   // Sync theme to <html>
   useEffect(() => {
@@ -179,6 +247,43 @@ function VaultApp() {
     };
   }, [user, preferences.vaultPinHash, preferences.autoLockMinutes, isLocked]);
 
+  // Clipboard countdown auto-clear
+  useEffect(() => {
+    if (!clipboardTimer) return;
+    if (clipboardTimer.secondsLeft <= 0) {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        void navigator.clipboard.writeText('').catch(() => {});
+      }
+      setClipboardTimer(null);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setClipboardTimer((curr) =>
+        curr ? { ...curr, secondsLeft: curr.secondsLeft - 1 } : null
+      );
+    }, 1000);
+    return () => window.clearTimeout(id);
+  }, [clipboardTimer]);
+
+  const copySecretWithTimer = useCallback(
+    (value: string, label = 'البيان السري') => {
+      if (!value) return;
+      void navigator.clipboard.writeText(value);
+      const seconds = preferences.clipboardClearSeconds ?? 30;
+      if (seconds > 0) {
+        setClipboardTimer({ secondsLeft: seconds, label });
+      }
+    },
+    [preferences.clipboardClearSeconds]
+  );
+
+  const clearClipboardNow = () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText('').catch(() => {});
+    }
+    setClipboardTimer(null);
+  };
+
   const persistVault = useCallback(
     async (nextAccounts: VaultAccount[], nextPrefs: VaultPreferences) => {
       if (!user) return;
@@ -200,7 +305,7 @@ function VaultApp() {
     setAuthError(null);
     try {
       const session = await loginLocalUser(params);
-      initialLockCheckedRef.current = true; // Just authenticated manually
+      initialLockCheckedRef.current = true;
       setUser(session);
       setRegisteredUsersCount(getRegisteredUsersCount());
     } catch (error) {
@@ -234,12 +339,21 @@ function VaultApp() {
     clearSavedSession();
     setUser(null);
     setSelectedAccountId(null);
+    setClipboardTimer(null);
     setAuthError(null);
   };
 
   const emailIdentities = useMemo(
     () => accounts.filter((a) => a.recordType === 'email'),
     [accounts]
+  );
+
+  const totalSitesAndAppsCount = useMemo(
+    () =>
+      accounts.length -
+      emailIdentities.length +
+      accounts.reduce((sum, a) => sum + (a.registeredSites?.length || 0), 0),
+    [accounts, emailIdentities.length]
   );
 
   const selectedAccount = useMemo(
@@ -257,30 +371,89 @@ function VaultApp() {
     auditReport.weakPasswordAccounts.length +
     auditReport.birthdateMismatches.length;
 
+  const totpCount = useMemo(
+    () => accounts.filter((a) => Boolean(a.totpSecret && a.totpSecret.trim())).length,
+    [accounts]
+  );
+
+  const attentionCount = useMemo(
+    () => accounts.filter((a) => getAccountNeedsAttention(a, auditReport)).length,
+    [accounts, auditReport]
+  );
+
+  const strongPasswordPercent = useMemo(() => {
+    const withPwd = accounts.filter((a) => Boolean(a.password));
+    if (withPwd.length === 0) return 0;
+    const strong = withPwd.filter((a) => {
+      const ev = evaluatePasswordStrength(a.password);
+      return ev.tier === 'strong' || ev.tier === 'excellent';
+    }).length;
+    return Math.round((strong / withPwd.length) * 100);
+  }, [accounts]);
+
+  const dueSoonSubsCount = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let count = 0;
+    const checkDate = (dateStr: string) => {
+      if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return;
+      const target = new Date(`${dateStr}T00:00:00`).getTime();
+      if (Number.isNaN(target)) return;
+      const days = Math.round((target - today.getTime()) / (1000 * 60 * 60 * 24));
+      if (days <= 14) count++;
+    };
+    for (const acc of accounts) {
+      if (acc.renewalDate) checkDate(acc.renewalDate);
+      for (const s of acc.registeredSites || []) {
+        if (s.renewalDate) checkDate(s.renewalDate);
+      }
+    }
+    return count;
+  }, [accounts]);
+
   const filteredAccounts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return accounts.filter((acc) => {
+    const matched = accounts.filter((acc) => {
       if (recordFilter === 'email' && acc.recordType !== 'email') return false;
       if (recordFilter === 'app' && acc.recordType !== 'app') return false;
       if (recordFilter === 'favorites' && !acc.isFavorite) return false;
+      if (recordFilter === 'attention' && !getAccountNeedsAttention(acc, auditReport)) return false;
       if (categoryFilter !== 'all' && acc.category !== categoryFilter) return false;
 
       if (q) {
         const questionsText = (acc.securityQuestions || [])
           .map((sq) => `${sq.question} ${sq.answer}`)
           .join(' ');
+        const sitesText = (acc.registeredSites || [])
+          .map((s) => `${s.name} ${s.url} ${s.username} ${s.displayName} ${s.phoneNumber} ${s.notes}`)
+          .join(' ');
+        const customText = (acc.customFields || [])
+          .map((cf) => `${cf.label} ${cf.isSecret ? '' : cf.value}`)
+          .join(' ');
         const haystack = [
           acc.title,
           acc.emailAddress,
           acc.username,
           acc.displayName,
+          acc.registeredFullName,
+          acc.accountRegion,
+          acc.billingAddressHint,
+          acc.billingEmail,
+          acc.creationContext,
+          acc.recoveryContactPerson,
+          acc.emergencyInstructions,
+          acc.accountExternalId,
+          acc.linkedPaymentHint,
           acc.phoneNumber,
           acc.recoveryEmail,
           acc.registeredBirthdate,
           acc.accountCreatedAt,
           acc.websiteUrl,
           acc.notes,
+          ...(acc.trustedDevices || []),
           questionsText,
+          sitesText,
+          customText,
         ]
           .join(' ')
           .toLowerCase();
@@ -288,13 +461,33 @@ function VaultApp() {
       }
       return true;
     });
-  }, [accounts, recordFilter, categoryFilter, searchQuery]);
+
+    return [...matched].sort((a, b) => {
+      if (sortBy === 'title') {
+        return a.title.localeCompare(b.title, 'ar');
+      }
+      if (sortBy === 'created_newest') {
+        return (b.accountCreatedAt || '').localeCompare(a.accountCreatedAt || '');
+      }
+      if (sortBy === 'created_oldest') {
+        const ad = a.accountCreatedAt || '9999-12-31';
+        const bd = b.accountCreatedAt || '9999-12-31';
+        return ad.localeCompare(bd);
+      }
+      if (sortBy === 'completeness') {
+        return getAccountFieldCompleteness(b).filled - getAccountFieldCompleteness(a).filled;
+      }
+      const aTime = typeof a.updatedAt === 'number' ? a.updatedAt : 0;
+      const bTime = typeof b.updatedAt === 'number' ? b.updatedAt : 0;
+      return bTime - aTime;
+    });
+  }, [accounts, recordFilter, categoryFilter, searchQuery, sortBy, auditReport]);
 
   const handleSaveAccount = useCallback(
     async (draft: VaultAccountDraft, existingId?: string) => {
       if (!user) return;
       const accountId = existingId || generateSafeId(draft.recordType === 'email' ? 'em' : 'ap');
-      const validParents = new Set(emailIdentities.map((e) => e.id));
+      const validParents = new Set(accounts.filter((a) => a.id !== accountId).map((a) => a.id));
       const sanitized = sanitizeAccountPayload(draft, user.uid, accountId, validParents);
       const now = Date.now();
 
@@ -321,7 +514,7 @@ function VaultApp() {
       setAccounts(nextAccounts);
       await persistVault(nextAccounts, preferences);
     },
-    [user, emailIdentities, accounts, preferences, persistVault]
+    [user, accounts, preferences, persistVault]
   );
 
   const handleDeleteAccount = useCallback(
@@ -475,22 +668,276 @@ function VaultApp() {
     [user, emailIdentities, accounts, preferences, persistVault]
   );
 
-  const openNewAccountModal = (overrides?: Partial<VaultAccountDraft>) => {
+  const handleAddQuickSite = useCallback(
+    async (parentAccount: VaultAccount, site: RegisteredSiteItem) => {
+      if (!user) return;
+      const now = Date.now();
+      const nextAccounts = accounts.map((a) =>
+        a.id === parentAccount.id
+          ? {
+              ...a,
+              registeredSites: [site, ...(a.registeredSites || [])],
+              updatedAt: now,
+            }
+          : a
+      );
+      setAccounts(nextAccounts);
+      await persistVault(nextAccounts, preferences);
+    },
+    [user, accounts, preferences, persistVault]
+  );
+
+  const handleUpdateQuickSite = useCallback(
+    async (parentAccount: VaultAccount, updatedSite: RegisteredSiteItem) => {
+      if (!user) return;
+      const now = Date.now();
+      const nextAccounts = accounts.map((a) =>
+        a.id === parentAccount.id
+          ? {
+              ...a,
+              registeredSites: (a.registeredSites || []).map((s) =>
+                s.id === updatedSite.id ? updatedSite : s
+              ),
+              updatedAt: now,
+            }
+          : a
+      );
+      setAccounts(nextAccounts);
+      await persistVault(nextAccounts, preferences);
+    },
+    [user, accounts, preferences, persistVault]
+  );
+
+  const handleRemoveQuickSite = useCallback(
+    async (parentAccount: VaultAccount, siteId: string) => {
+      if (!user) return;
+      const now = Date.now();
+      const nextAccounts = accounts.map((a) =>
+        a.id === parentAccount.id
+          ? {
+              ...a,
+              registeredSites: (a.registeredSites || []).filter((s) => s.id !== siteId),
+              updatedAt: now,
+            }
+          : a
+      );
+      setAccounts(nextAccounts);
+      await persistVault(nextAccounts, preferences);
+    },
+    [user, accounts, preferences, persistVault]
+  );
+
+  const handlePromoteSiteToAccount = useCallback(
+    async (parentAccount: VaultAccount, site: RegisteredSiteItem) => {
+      if (!user) return;
+      const now = Date.now();
+      const newAccountId = generateSafeId('ap');
+      const draft = createEmptyAccountDraft({
+        recordType: 'app',
+        title: site.name,
+        platformKey: site.platformKey || 'custom',
+        category: 'other',
+        parentEmailId: parentAccount.id,
+        emailAddress: parentAccount.emailAddress,
+        username: site.username,
+        displayName: site.displayName,
+        password: site.password,
+        phoneNumber: site.phoneNumber,
+        pinCode: site.pinCode,
+        websiteUrl: site.url,
+        loginMethod: site.signupMethod === 'oauth_button' ? 'google_oauth' : 'email_password',
+        registeredBirthdate: site.registeredBirthdate || parentAccount.registeredBirthdate,
+        accountCreatedAt: site.createdAtDate,
+        createdDateApproximate: site.isApproximateDate,
+        twoFactorEnabled: site.twoFactorEnabled,
+        linkedPaymentHint: site.linkedCardHint,
+        subscriptionCost: site.subscriptionCost,
+        renewalDate: site.renewalDate,
+        primaryDevice: site.deviceUsed,
+        notes: site.notes,
+      });
+      const validParents = new Set(accounts.map((a) => a.id));
+      const sanitized = sanitizeAccountPayload(draft, user.uid, newAccountId, validParents);
+      const promoted: VaultAccount = { ...sanitized, createdAt: now, updatedAt: now };
+
+      const nextAccounts = [
+        promoted,
+        ...accounts.map((a) =>
+          a.id === parentAccount.id
+            ? {
+                ...a,
+                registeredSites: (a.registeredSites || []).filter((s) => s.id !== site.id),
+                updatedAt: now,
+              }
+            : a
+        ),
+      ];
+      setAccounts(nextAccounts);
+      setSelectedAccountId(promoted.id);
+      await persistVault(nextAccounts, preferences);
+    },
+    [user, accounts, preferences, persistVault]
+  );
+
+  const openNewAccountModal = (overrides?: Partial<VaultAccountDraft>, initialTab: ModalTab = 'identity') => {
     setEditingAccount(null);
     setDraftOverrides(overrides);
+    setModalInitialTab(initialTab);
     setModalOpen(true);
   };
 
-  const openEditAccountModal = (acc: VaultAccount) => {
+  const openEditAccountModal = (acc: VaultAccount, initialTab: ModalTab = 'identity') => {
     setEditingAccount(acc);
     setDraftOverrides(undefined);
+    setModalInitialTab(initialTab);
     setModalOpen(true);
   };
 
-  const copyQuick = (e: React.MouseEvent, value: string, key: string) => {
+  const handleRotatePassword = useCallback(
+    async (acc: VaultAccount, newPassword: string, note: string) => {
+      if (!user || !newPassword.trim()) return;
+      const today = new Date().toISOString().slice(0, 10);
+      const now = Date.now();
+      const historyEntry = acc.password
+        ? [
+            {
+              password: acc.password,
+              changedAt: today,
+              note: note.trim() || 'تدوير سريع',
+            },
+          ]
+        : [];
+      const nextAccounts = accounts.map((a) =>
+        a.id === acc.id
+          ? {
+              ...a,
+              password: newPassword.trim(),
+              lastPasswordChangedAt: today,
+              passwordHistory: [...historyEntry, ...(a.passwordHistory || [])],
+              updatedAt: now,
+            }
+          : a
+      );
+      setAccounts(nextAccounts);
+      await persistVault(nextAccounts, preferences);
+    },
+    [user, accounts, preferences, persistVault]
+  );
+
+  const handleMarkAccessedToday = useCallback(
+    async (acc: VaultAccount) => {
+      if (!user) return;
+      const today = new Date().toISOString().slice(0, 10);
+      const now = Date.now();
+      const nextAccounts = accounts.map((a) =>
+        a.id === acc.id
+          ? {
+              ...a,
+              lastAccessedAt: today,
+              updatedAt: now,
+            }
+          : a
+      );
+      setAccounts(nextAccounts);
+      await persistVault(nextAccounts, preferences);
+    },
+    [user, accounts, preferences, persistVault]
+  );
+
+  const handleDuplicateAccount = (acc: VaultAccount) => {
+    setSelectedAccountId(null);
+    openNewAccountModal({
+      recordType: acc.recordType,
+      title: `${acc.title} (نسخة)`,
+      platformKey: acc.platformKey,
+      category: acc.category,
+      parentEmailId: acc.parentEmailId,
+      emailAddress: acc.emailAddress,
+      username: acc.username,
+      displayName: acc.displayName,
+      registeredFullName: acc.registeredFullName,
+      registeredGender: acc.registeredGender,
+      accountRegion: acc.accountRegion,
+      billingAddressHint: acc.billingAddressHint,
+      billingEmail: acc.billingEmail,
+      loginMethod: acc.loginMethod,
+      registeredBirthdate: acc.registeredBirthdate,
+      primaryDevice: acc.primaryDevice,
+      recoveryEmail: acc.recoveryEmail,
+      recoveryPhone: acc.recoveryPhone,
+      phoneNumber: acc.phoneNumber,
+      websiteUrl: acc.websiteUrl,
+      password: '',
+    });
+  };
+
+  const openExcelModal = (
+    scopedAccounts?: VaultAccount[],
+    scopeLabel?: string,
+    customFileSuffix?: string
+  ) => {
+    if (scopedAccounts) {
+      setExcelScope({ accounts: scopedAccounts, scopeLabel, customFileSuffix });
+    } else {
+      setExcelScope(null);
+    }
+    setExcelModalOpen(true);
+  };
+
+  const toggleSelectId = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleBulkFavorite = async () => {
+    if (!user || selectedIds.length === 0) return;
+    const now = Date.now();
+    const idSet = new Set(selectedIds);
+    const nextAccounts = accounts.map((a) =>
+      idSet.has(a.id) ? { ...a, isFavorite: true, updatedAt: now } : a
+    );
+    setAccounts(nextAccounts);
+    await persistVault(nextAccounts, preferences);
+  };
+
+  const handleBulkCategory = async (category: AccountCategory) => {
+    if (!user || selectedIds.length === 0) return;
+    const now = Date.now();
+    const idSet = new Set(selectedIds);
+    const nextAccounts = accounts.map((a) =>
+      idSet.has(a.id) ? { ...a, category, updatedAt: now } : a
+    );
+    setAccounts(nextAccounts);
+    await persistVault(nextAccounts, preferences);
+  };
+
+  const handleBulkDelete = async () => {
+    if (!user || selectedIds.length === 0) return;
+    const now = Date.now();
+    const idSet = new Set(selectedIds);
+    const nextAccounts = accounts
+      .filter((a) => !idSet.has(a.id))
+      .map((a) =>
+        a.parentEmailId && idSet.has(a.parentEmailId)
+          ? { ...a, parentEmailId: '', updatedAt: now }
+          : a
+      );
+    setAccounts(nextAccounts);
+    setSelectedIds([]);
+    setSelectionMode(false);
+    setConfirmBulkDelete(false);
+    await persistVault(nextAccounts, preferences);
+  };
+
+  const copyQuick = (e: React.MouseEvent, value: string, key: string, isSecret = false, secretLabel = 'كلمة المرور') => {
     e.stopPropagation();
     if (!value) return;
-    void navigator.clipboard.writeText(value);
+    if (isSecret) {
+      copySecretWithTimer(value, secretLabel);
+    } else {
+      void navigator.clipboard.writeText(value);
+    }
     setCopiedKey(key);
     setTimeout(() => setCopiedKey((curr) => (curr === key ? null : curr)), 1500);
   };
@@ -535,15 +982,32 @@ function VaultApp() {
       badge: accounts.length,
     },
     {
+      id: 'sites',
+      label: 'دليل المواقع والتطبيقات',
+      icon: <Globe className="w-4 h-4 shrink-0" />,
+      badge: totalSitesAndAppsCount,
+    },
+    {
       id: 'graph',
       label: 'خريطة الإيميلات والتطبيقات',
       icon: <Link2 className="w-4 h-4 shrink-0" />,
       badge: emailIdentities.length,
     },
     {
+      id: 'totp',
+      label: 'رموز التحقق الحية (2FA)',
+      icon: <Shield className="w-4 h-4 shrink-0" />,
+      badge: totpCount > 0 ? totpCount : undefined,
+    },
+    {
       id: 'dates',
       label: 'سجل التواريخ والميلاد',
       icon: <Calendar className="w-4 h-4 shrink-0" />,
+    },
+    {
+      id: 'subscriptions',
+      label: 'الاشتراكات والتجديدات',
+      icon: <CreditCard className="w-4 h-4 shrink-0" />,
     },
     {
       id: 'audit',
@@ -690,7 +1154,44 @@ function VaultApp() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setCommandPaletteOpen(true)}
+              className="hidden md:inline-flex items-center gap-2 px-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title="بحث سريع (Ctrl+K)"
+            >
+              <Search className="w-3.5 h-3.5 text-slate-400" />
+              <span>بحث سريع...</span>
+              <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-500">
+                ⌘K
+              </kbd>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setPrivacyMode((p) => !p)}
+              className={`p-2 rounded-lg border transition-colors cursor-pointer ${
+                privacyMode
+                  ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300'
+                  : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+              title={privacyMode ? 'إلغاء وضع الخصوصية' : 'تفعيل وضع الخصوصية (إخفاء البيانات الحساسة)'}
+              aria-label={privacyMode ? 'إلغاء وضع الخصوصية' : 'تفعيل وضع الخصوصية'}
+            >
+              {privacyMode ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openExcelModal()}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title="تصدير ملف إكسل منسق وفخم بكل الحسابات وما بداخلها"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <span>تصدير Excel</span>
+            </button>
+
             <button
               type="button"
               onClick={handleToggleTheme}
@@ -709,7 +1210,7 @@ function VaultApp() {
                   category: 'email',
                 })
               }
-              className="hidden sm:inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="hidden lg:inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Mail className="w-3.5 h-3.5" />
               <span>بريد جديد</span>
@@ -741,9 +1242,9 @@ function VaultApp() {
                   </p>
                 </div>
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 space-y-1">
-                  <span className="text-xs text-slate-500 dark:text-slate-400">التطبيقات والمواقع</span>
+                  <span className="text-xs text-slate-500 dark:text-slate-400">التطبيقات والمواقع المسجلة</span>
                   <p className="text-2xl font-bold font-mono tabular-nums">
-                    {accounts.length - emailIdentities.length}
+                    {totalSitesAndAppsCount}
                   </p>
                 </div>
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 space-y-1">
@@ -754,26 +1255,108 @@ function VaultApp() {
                 </div>
               </div>
 
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              {/* Vault Security Posture Strip + Subscription Due Alert */}
+              {accounts.length > 0 && (
+                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-4 text-xs">
+                  <div className="flex flex-wrap items-center gap-x-5 gap-y-2 tabular-nums">
+                    <span className="text-slate-600 dark:text-slate-300">
+                      قوة كلمات المرور:{' '}
+                      <strong
+                        className={
+                          strongPasswordPercent >= 80
+                            ? 'text-emerald-600 dark:text-emerald-400 font-mono'
+                            : 'text-amber-600 dark:text-amber-400 font-mono'
+                        }
+                      >
+                        {strongPasswordPercent}%
+                      </strong>
+                    </span>
+                    <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
+                    <span className="text-slate-600 dark:text-slate-300">
+                      مفاتيح 2FA حية:{' '}
+                      <strong className="font-mono text-indigo-600 dark:text-indigo-400">
+                        {totpCount}
+                      </strong>
+                    </span>
+                    {attentionCount > 0 && (
+                      <>
+                        <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
+                        <button
+                          type="button"
+                          onClick={() => setRecordFilter('attention')}
+                          className="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-semibold hover:underline cursor-pointer"
+                        >
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          <span>{attentionCount} حسابات تستحق المراجعة</span>
+                        </button>
+                      </>
+                    )}
+                    {dueSoonSubsCount > 0 && (
+                      <>
+                        <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveSection('subscriptions')}
+                          className="inline-flex items-center gap-1.5 text-rose-600 dark:text-rose-400 font-semibold hover:underline cursor-pointer"
+                        >
+                          <CreditCard className="w-3.5 h-3.5" />
+                          <span>{dueSoonSubsCount} اشتراكات قريبة التجديد</span>
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setActiveSection('audit')}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 font-medium transition-colors whitespace-nowrap cursor-pointer"
+                    >
+                      مركز التدقيق
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSection('totp')}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 font-medium transition-colors whitespace-nowrap cursor-pointer"
+                    >
+                      رموز 2FA
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openExcelModal()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      <span>تصدير الكل لـ Excel</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
                 <div className="relative flex-1 max-w-md">
                   <Search className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="ابحث بالاسم، الإيميل، اسم المستخدم، سنة الميلاد، الملاحظات..."
+                    placeholder="ابحث بالاسم، الإيميل، المواقع المسجّلة به، الدولة، سنة الميلاد..."
                     className="w-full pr-10 pl-4 py-2.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3">
-                  <div className="flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-800 rounded-lg">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-800 rounded-lg overflow-x-auto">
                     {(
                       [
                         { id: 'all', label: 'الكل' },
                         { id: 'email', label: 'الإيميلات' },
                         { id: 'app', label: 'التطبيقات' },
                         { id: 'favorites', label: 'المفضلة' },
+                        {
+                          id: 'attention',
+                          label: attentionCount > 0 ? `تحتاج انتباه (${attentionCount})` : 'تحتاج انتباه',
+                        },
                       ] as { id: RecordFilter; label: string }[]
                     ).map((tab) => (
                       <button
@@ -806,8 +1389,162 @@ function VaultApp() {
                       </option>
                     ))}
                   </select>
+
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value as SortOption)}
+                    aria-label="ترتيب النتائج"
+                    className="px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="updated">الأحدث تعديلاً</option>
+                    <option value="created_newest">تاريخ الإنشاء (الأحدث)</option>
+                    <option value="created_oldest">الأقدم تأسيساً</option>
+                    <option value="title">الترتيب الأبجدي</option>
+                    <option value="completeness">اكتمال البيانات</option>
+                  </select>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectionMode((prev) => !prev);
+                      setSelectedIds([]);
+                      setConfirmBulkDelete(false);
+                    }}
+                    className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      selectionMode
+                        ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300'
+                        : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <CheckSquare className="w-3.5 h-3.5" />
+                    <span>تحديد متعدد</span>
+                  </button>
+
+                  <div className="flex items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-800 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('cards')}
+                      className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                        viewMode === 'cards'
+                          ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                          : 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-100'
+                      }`}
+                      aria-label="عرض كبطاقات"
+                      title="عرض كبطاقات"
+                    >
+                      <LayoutGrid className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('table')}
+                      className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                        viewMode === 'table'
+                          ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                          : 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-100'
+                      }`}
+                      aria-label="عرض كجدول"
+                      title="عرض كجدول"
+                    >
+                      <List className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
               </div>
+
+              {/* Bulk Selection Toolbar */}
+              {selectionMode && (
+                <div className="bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="font-bold text-indigo-900 dark:text-indigo-200 tabular-nums">
+                      المحدد: {selectedIds.length} من {filteredAccounts.length}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedIds(
+                          selectedIds.length === filteredAccounts.length
+                            ? []
+                            : filteredAccounts.map((a) => a.id)
+                        )
+                      }
+                      className="text-indigo-700 dark:text-indigo-300 hover:underline font-medium cursor-pointer"
+                    >
+                      {selectedIds.length === filteredAccounts.length ? 'إلغاء الكل' : 'تحديد الكل'}
+                    </button>
+                  </div>
+
+                  {selectedIds.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const subset = accounts.filter((a) => selectedIds.includes(a.id));
+                          openExcelModal(subset, `الحسابات المحددة (${subset.length})`, 'selected');
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold cursor-pointer"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5" />
+                        <span>تصدير المحدد لـ Excel</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleBulkFavorite()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 font-medium cursor-pointer"
+                      >
+                        <Star className="w-3.5 h-3.5 text-amber-500" />
+                        <span>إضافة للمفضلة</span>
+                      </button>
+
+                      <select
+                        defaultValue=""
+                        onChange={(e) => {
+                          if (!e.target.value) return;
+                          void handleBulkCategory(e.target.value as AccountCategory);
+                          e.target.value = '';
+                        }}
+                        aria-label="نقل المحدد لتصنيف"
+                        className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900"
+                      >
+                        <option value="">نقل لتصنيف...</option>
+                        {(Object.keys(CATEGORY_LABELS) as AccountCategory[]).map((cat) => (
+                          <option key={cat} value={cat}>
+                            {CATEGORY_LABELS[cat]}
+                          </option>
+                        ))}
+                      </select>
+
+                      {confirmBulkDelete ? (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => void handleBulkDelete()}
+                            className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold cursor-pointer"
+                          >
+                            تأكيد حذف ({selectedIds.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmBulkDelete(false)}
+                            className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 cursor-pointer"
+                          >
+                            تراجع
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmBulkDelete(true)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-400 bg-white dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950/30 font-medium cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>حذف</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {loadingAccounts ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -864,10 +1601,150 @@ function VaultApp() {
                   <p className="text-sm font-semibold">لا توجد نتائج مطابقة لبحثك</p>
                   <p className="text-xs text-slate-500">جرّب تغيير كلمات البحث أو إزالة التصفية.</p>
                 </div>
+              ) : viewMode === 'table' ? (
+                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-right text-xs">
+                      <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+                        <tr>
+                          {selectionMode && <th className="py-3 px-3 w-8" />}
+                          <th className="py-3 px-4 font-semibold">الحساب</th>
+                          <th className="py-3 px-4 font-semibold">البريد / المستخدم</th>
+                          <th className="py-3 px-4 font-semibold">الأمان</th>
+                          <th className="py-3 px-4 font-semibold">الميلاد</th>
+                          <th className="py-3 px-4 font-semibold">تاريخ الإنشاء</th>
+                          <th className="py-3 px-4 font-semibold">إجراء سريع</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {filteredAccounts.map((acc) => {
+                          const pwdStrength = evaluatePasswordStrength(acc.password);
+                          const createdDur = calculateAccountDuration(acc.accountCreatedAt);
+                          const isSelected = selectedIds.includes(acc.id);
+                          return (
+                            <tr
+                              key={acc.id}
+                              onClick={() =>
+                                selectionMode
+                                  ? toggleSelectId(acc.id)
+                                  : setSelectedAccountId(acc.id)
+                              }
+                              className={`transition-colors cursor-pointer ${
+                                isSelected
+                                  ? 'bg-indigo-50/70 dark:bg-indigo-950/30'
+                                  : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                              }`}
+                            >
+                              {selectionMode && (
+                                <td className="py-3 px-3">
+                                  {isSelected ? (
+                                    <CheckSquare className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                                  ) : (
+                                    <Square className="w-4 h-4 text-slate-400" />
+                                  )}
+                                </td>
+                              )}
+                              <td className="py-3 px-4">
+                                <div className="flex items-center gap-2.5">
+                                  <PlatformIcon
+                                    platformKey={acc.platformKey}
+                                    recordType={acc.recordType}
+                                    size="sm"
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="font-semibold truncate">{acc.title}</span>
+                                      {acc.isFavorite && (
+                                        <Star className="w-3 h-3 fill-amber-400 text-amber-400 shrink-0" />
+                                      )}
+                                    </div>
+                                    <span className="text-[11px] text-slate-500">
+                                      {acc.recordType === 'email'
+                                        ? 'بريد رئيسي'
+                                        : CATEGORY_LABELS[acc.category]}
+                                    </span>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="py-3 px-4 font-mono text-slate-700 dark:text-slate-300" dir="ltr">
+                                {privacyMode
+                                  ? '••••••••'
+                                  : acc.emailAddress || acc.username || '—'}
+                              </td>
+                              <td className="py-3 px-4 whitespace-nowrap">
+                                <div className="flex items-center gap-2">
+                                  {acc.twoFactorEnabled && (
+                                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                                  )}
+                                  <span
+                                    className={
+                                      pwdStrength.tier === 'strong' || pwdStrength.tier === 'excellent'
+                                        ? 'text-emerald-600 dark:text-emerald-400'
+                                        : pwdStrength.tier === 'weak'
+                                          ? 'text-rose-600 dark:text-rose-400'
+                                          : 'text-slate-500'
+                                    }
+                                  >
+                                    {pwdStrength.label}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="py-3 px-4 font-mono tabular-nums" dir="ltr">
+                                {formatReadableDate(acc.registeredBirthdate)}
+                              </td>
+                              <td className="py-3 px-4 tabular-nums text-slate-500 dark:text-slate-400">
+                                {createdDur ? createdDur.label : formatReadableDate(acc.accountCreatedAt)}
+                              </td>
+                              <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
+                                <div className="flex items-center gap-1.5">
+                                  {(acc.emailAddress || acc.username) && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) =>
+                                        copyQuick(
+                                          e,
+                                          acc.emailAddress || acc.username,
+                                          `tbl_u_${acc.id}`
+                                        )
+                                      }
+                                      className="px-2 py-1 text-[11px] rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                                    >
+                                      {copiedKey === `tbl_u_${acc.id}` ? 'تم' : 'نسخ البريد'}
+                                    </button>
+                                  )}
+                                  {acc.password && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) =>
+                                        copyQuick(
+                                          e,
+                                          acc.password,
+                                          `tbl_p_${acc.id}`,
+                                          true,
+                                          `كلمة مرور ${acc.title}`
+                                        )
+                                      }
+                                      className="px-2 py-1 text-[11px] rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                                    >
+                                      {copiedKey === `tbl_p_${acc.id}` ? 'تم' : 'نسخ السر'}
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                   {filteredAccounts.map((acc) => {
                     const pwdRevealed = Boolean(revealedCardPwds[acc.id]);
+                    const isSelected = selectedIds.includes(acc.id);
+                    const pwdEval = evaluatePasswordStrength(acc.password);
+                    const pwdRisks = analyzePasswordRisks(acc, preferences.realBirthdate);
                     const linkedAppsCount =
                       acc.recordType === 'email'
                         ? accounts.filter(
@@ -885,12 +1762,29 @@ function VaultApp() {
                     return (
                       <div
                         key={acc.id}
-                        onClick={() => setSelectedAccountId(acc.id)}
-                        className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-indigo-400 dark:hover:border-indigo-600 rounded-xl p-5 space-y-4 transition-colors cursor-pointer flex flex-col justify-between"
+                        onClick={() =>
+                          selectionMode
+                            ? toggleSelectId(acc.id)
+                            : setSelectedAccountId(acc.id)
+                        }
+                        className={`bg-white dark:bg-slate-900 border rounded-xl p-5 space-y-4 transition-colors cursor-pointer flex flex-col justify-between ${
+                          isSelected
+                            ? 'border-indigo-600 ring-1 ring-indigo-600 dark:border-indigo-400'
+                            : 'border-slate-200 dark:border-slate-800 hover:border-indigo-400 dark:hover:border-indigo-600'
+                        }`}
                       >
                         <div className="space-y-3">
                           <div className="flex items-start justify-between gap-3">
                             <div className="flex items-center gap-3 min-w-0">
+                              {selectionMode && (
+                                <span className="shrink-0">
+                                  {isSelected ? (
+                                    <CheckSquare className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                                  ) : (
+                                    <Square className="w-4 h-4 text-slate-400" />
+                                  )}
+                                </span>
+                              )}
                               <PlatformIcon
                                 platformKey={acc.platformKey}
                                 recordType={acc.recordType}
@@ -903,30 +1797,44 @@ function VaultApp() {
                                     <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" />
                                   )}
                                 </div>
-                                <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                                <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                                   <span>
                                     {acc.recordType === 'email'
                                       ? 'بريد رئيسي'
                                       : CATEGORY_LABELS[acc.category]}
                                   </span>
-                                  {acc.recordType === 'email' && (
+                                  {(linkedAppsCount > 0 || (acc.registeredSites?.length || 0) > 0) && (
                                     <>
                                       <span aria-hidden="true">·</span>
-                                      <span className="tabular-nums">
-                                        {linkedAppsCount} تطبيقات مرتبطة
+                                      <span className="tabular-nums text-indigo-600 dark:text-indigo-400">
+                                        {linkedAppsCount + (acc.registeredSites?.length || 0)} مواقع وتطبيقات
                                       </span>
+                                    </>
+                                  )}
+                                  {acc.accountRegion && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span>{acc.accountRegion}</span>
                                     </>
                                   )}
                                 </div>
                               </div>
                             </div>
 
-                            {acc.twoFactorEnabled && (
-                              <ShieldCheck
-                                className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0"
-                                aria-label="محمي بالتحقق بخطوتين"
-                              />
-                            )}
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {pwdRisks.length > 0 && (
+                                <AlertTriangle
+                                  className="w-4 h-4 text-rose-500"
+                                  aria-label={pwdRisks.join(' - ')}
+                                />
+                              )}
+                              {acc.twoFactorEnabled && (
+                                <ShieldCheck
+                                  className="w-4 h-4 text-emerald-600 dark:text-emerald-400"
+                                  aria-label="محمي بالتحقق بخطوتين"
+                                />
+                              )}
+                            </div>
                           </div>
 
                           <div className="space-y-1.5 text-xs">
@@ -938,7 +1846,7 @@ function VaultApp() {
                                     className="font-mono text-slate-700 dark:text-slate-300 truncate"
                                     dir="ltr"
                                   >
-                                    {acc.emailAddress}
+                                    {privacyMode ? '••••••@••••' : acc.emailAddress}
                                   </span>
                                   <button
                                     type="button"
@@ -964,7 +1872,7 @@ function VaultApp() {
                                     className="font-mono text-slate-700 dark:text-slate-300 truncate"
                                     dir="ltr"
                                   >
-                                    {acc.username}
+                                    {privacyMode ? '••••••' : acc.username}
                                   </span>
                                   <button
                                     type="button"
@@ -983,47 +1891,72 @@ function VaultApp() {
                             )}
 
                             {acc.password && (
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-slate-400 shrink-0">كلمة المرور</span>
-                                <div className="flex items-center gap-1.5 min-w-0">
-                                  <span
-                                    className="font-mono text-slate-800 dark:text-slate-200 truncate"
-                                    dir="ltr"
-                                  >
-                                    {pwdRevealed ? acc.password : '••••••••••'}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setRevealedCardPwds((p) => ({
-                                        ...p,
-                                        [acc.id]: !pwdRevealed,
-                                      }));
-                                    }}
-                                    className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 p-0.5 cursor-pointer"
-                                    aria-label="إظهار أو إخفاء كلمة المرور"
-                                  >
-                                    {pwdRevealed ? (
-                                      <EyeOff className="w-3.5 h-3.5" />
-                                    ) : (
-                                      <Eye className="w-3.5 h-3.5" />
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-slate-400 shrink-0">كلمة المرور</span>
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span
+                                      className="font-mono text-slate-800 dark:text-slate-200 truncate"
+                                      dir="ltr"
+                                    >
+                                      {pwdRevealed && !privacyMode ? acc.password : '••••••••••'}
+                                    </span>
+                                    {!privacyMode && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setRevealedCardPwds((p) => ({
+                                            ...p,
+                                            [acc.id]: !pwdRevealed,
+                                          }));
+                                        }}
+                                        className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 p-0.5 cursor-pointer"
+                                        aria-label="إظهار أو إخفاء كلمة المرور"
+                                      >
+                                        {pwdRevealed ? (
+                                          <EyeOff className="w-3.5 h-3.5" />
+                                        ) : (
+                                          <Eye className="w-3.5 h-3.5" />
+                                        )}
+                                      </button>
                                     )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => copyQuick(e, acc.password, `pw_${acc.id}`)}
-                                    className="text-slate-400 hover:text-indigo-600 p-0.5 cursor-pointer"
-                                    aria-label="نسخ كلمة المرور"
-                                  >
-                                    {copiedKey === `pw_${acc.id}` ? (
-                                      <Check className="w-3.5 h-3.5 text-emerald-600" />
-                                    ) : (
-                                      <Copy className="w-3.5 h-3.5" />
-                                    )}
-                                  </button>
+                                    <button
+                                      type="button"
+                                      onClick={(e) =>
+                                        copyQuick(e, acc.password, `pw_${acc.id}`, true, `كلمة مرور ${acc.title}`)
+                                      }
+                                      className="text-slate-400 hover:text-indigo-600 p-0.5 cursor-pointer"
+                                      aria-label="نسخ كلمة المرور"
+                                    >
+                                      {copiedKey === `pw_${acc.id}` ? (
+                                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                      ) : (
+                                        <Copy className="w-3.5 h-3.5" />
+                                      )}
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="h-0.5 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                                  <div
+                                    className={`h-full ${
+                                      pwdEval.tier === 'excellent' || pwdEval.tier === 'strong'
+                                        ? 'bg-emerald-500'
+                                        : pwdEval.tier === 'fair'
+                                          ? 'bg-amber-500'
+                                          : 'bg-rose-500'
+                                    }`}
+                                    style={{ width: `${Math.max(12, pwdEval.score)}%` }}
+                                  />
                                 </div>
                               </div>
+                            )}
+
+                            {!privacyMode && (acc.registeredSites?.length || 0) > 0 && (
+                              <p className="text-xs text-slate-500 dark:text-slate-400 truncate pt-1">
+                                مسجّل به: {acc.registeredSites.slice(0, 3).map((s) => s.name).join(' · ')}
+                                {acc.registeredSites.length > 3 ? ` (+${acc.registeredSites.length - 3})` : ''}
+                              </p>
                             )}
                           </div>
                         </div>
@@ -1037,7 +1970,7 @@ function VaultApp() {
                           </span>
                           <span>
                             {createdDur
-                              ? createdDur.label
+                              ? `${createdDur.label}${acc.createdDateApproximate ? ' ~' : ''}`
                               : `الإنشاء: ${formatReadableDate(acc.accountCreatedAt)}`}
                           </span>
                         </div>
@@ -1047,6 +1980,16 @@ function VaultApp() {
                 </div>
               )}
             </>
+          )}
+
+          {activeSection === 'sites' && (
+            <SitesDirectoryView
+              accounts={accounts}
+              realBirthdate={preferences.realBirthdate}
+              onSelectAccount={(acc) => setSelectedAccountId(acc.id)}
+              onAddQuickSite={handleAddQuickSite}
+              onCopySecret={copySecretWithTimer}
+            />
           )}
 
           {activeSection === 'graph' && (
@@ -1061,6 +2004,7 @@ function VaultApp() {
                   registeredBirthdate: parentEmail.registeredBirthdate,
                 })
               }
+              onManageSites={(parentAccount) => openEditAccountModal(parentAccount, 'sites')}
               onAddNewEmail={() =>
                 openNewAccountModal({
                   recordType: 'email',
@@ -1068,6 +2012,21 @@ function VaultApp() {
                   category: 'email',
                 })
               }
+              onExportEmailTree={(email, linkedApps) =>
+                openExcelModal(
+                  [email, ...linkedApps],
+                  `شجرة ${email.title} (${email.emailAddress || 'بريد رئيسي'})`,
+                  email.platformKey || 'email-tree'
+                )
+              }
+            />
+          )}
+
+          {activeSection === 'totp' && (
+            <AuthenticatorHubView
+              accounts={accounts}
+              onSelectAccount={(acc) => setSelectedAccountId(acc.id)}
+              onCopySecret={copySecretWithTimer}
             />
           )}
 
@@ -1079,16 +2038,27 @@ function VaultApp() {
             />
           )}
 
+          {activeSection === 'subscriptions' && (
+            <SubscriptionsView
+              accounts={accounts}
+              onSelectAccount={(acc) => setSelectedAccountId(acc.id)}
+            />
+          )}
+
           {activeSection === 'audit' && (
             <SecurityAuditView
               accounts={accounts}
               realBirthdate={preferences.realBirthdate}
               onEditAccount={(acc) => openEditAccountModal(acc)}
               onSelectAccount={(acc) => setSelectedAccountId(acc.id)}
+              onRotatePassword={handleRotatePassword}
+              onCopySecret={copySecretWithTimer}
             />
           )}
 
-          {activeSection === 'generator' && <PasswordGeneratorView />}
+          {activeSection === 'generator' && (
+            <PasswordGeneratorView onCopySecret={copySecretWithTimer} />
+          )}
 
           {activeSection === 'settings' && (
             <SettingsView
@@ -1097,16 +2067,50 @@ function VaultApp() {
               onSavePreferences={handleSavePreferences}
               onImportAccounts={handleImportAccounts}
               onSeedSampleData={handleSeedSampleData}
+              onOpenExcelExport={() => openExcelModal()}
             />
           )}
         </main>
       </div>
 
+      {/* Floating Clipboard Auto-Clear Countdown Toast */}
+      {clipboardTimer && (
+        <div className="fixed bottom-4 left-4 z-50 bg-slate-900 dark:bg-slate-800 text-white border border-slate-700 rounded-xl px-4 py-3 shadow-xl flex items-center gap-4 text-xs">
+          <div className="flex items-center gap-2">
+            <Timer className="w-4 h-4 text-indigo-400 shrink-0" />
+            <div>
+              <p className="font-medium">تم نسخ: {clipboardTimer.label}</p>
+              <p className="text-slate-400 tabular-nums">
+                سيتم مسح الحافظة تلقائياً خلال {clipboardTimer.secondsLeft} ث
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={clearClipboardNow}
+              className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-700 text-white font-medium cursor-pointer"
+            >
+              مسح الآن
+            </button>
+            <button
+              type="button"
+              onClick={() => setClipboardTimer(null)}
+              className="p-1 text-slate-400 hover:text-white cursor-pointer"
+              aria-label="إلغاء المسح التلقائي"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       <AccountModal
         isOpen={modalOpen}
         editingAccount={editingAccount}
         initialDraftOverrides={draftOverrides}
-        emailIdentities={emailIdentities}
+        initialTab={modalInitialTab}
+        allAccounts={accounts}
         realBirthdate={preferences.realBirthdate}
         onClose={() => setModalOpen(false)}
         onSave={handleSaveAccount}
@@ -1118,17 +2122,56 @@ function VaultApp() {
         realBirthdate={preferences.realBirthdate}
         onClose={() => setSelectedAccountId(null)}
         onSelectAccount={(acc) => setSelectedAccountId(acc.id)}
-        onEdit={(acc) => openEditAccountModal(acc)}
+        onEdit={(acc, tab) => openEditAccountModal(acc, tab)}
         onDelete={handleDeleteAccount}
         onToggleFavorite={handleToggleFavorite}
-        onAddLinkedApp={(parentEmail) =>
+        onAddLinkedApp={(parentAccount) =>
           openNewAccountModal({
             recordType: 'app',
-            parentEmailId: parentEmail.id,
-            emailAddress: parentEmail.emailAddress,
-            registeredBirthdate: parentEmail.registeredBirthdate,
+            parentEmailId: parentAccount.id,
+            emailAddress: parentAccount.emailAddress,
+            registeredBirthdate: parentAccount.registeredBirthdate,
           })
         }
+        onAddQuickSite={handleAddQuickSite}
+        onUpdateQuickSite={handleUpdateQuickSite}
+        onRemoveQuickSite={handleRemoveQuickSite}
+        onPromoteSiteToAccount={handlePromoteSiteToAccount}
+        onRotatePassword={handleRotatePassword}
+        onMarkAccessedToday={handleMarkAccessedToday}
+        onDuplicateAccount={handleDuplicateAccount}
+        onExportExcel={(acc, linkedApps) =>
+          openExcelModal(
+            [acc, ...linkedApps],
+            `${acc.title}${linkedApps.length > 0 ? ` (+${linkedApps.length} مرتبطة)` : ''}`,
+            acc.platformKey || 'account'
+          )
+        }
+        onCopySecret={copySecretWithTimer}
+      />
+
+      <CommandPalette
+        isOpen={commandPaletteOpen}
+        accounts={accounts}
+        onClose={() => setCommandPaletteOpen(false)}
+        onSelectAccount={(acc) => setSelectedAccountId(acc.id)}
+        onCopySecret={copySecretWithTimer}
+        onNewAccount={() => openNewAccountModal()}
+        onOpenGenerator={() => setActiveSection('generator')}
+        onOpenExcelExport={() => openExcelModal()}
+      />
+
+      <ExcelExportModal
+        isOpen={excelModalOpen}
+        accounts={excelScope ? excelScope.accounts : accounts}
+        realBirthdate={preferences.realBirthdate}
+        ownerUsername={user.username}
+        scopeLabel={excelScope?.scopeLabel}
+        customFileSuffix={excelScope?.customFileSuffix}
+        onClose={() => {
+          setExcelModalOpen(false);
+          setExcelScope(null);
+        }}
       />
 
       <OfflineIndicator />

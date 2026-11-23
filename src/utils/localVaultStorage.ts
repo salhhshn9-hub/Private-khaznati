@@ -1,4 +1,5 @@
 import { VaultAccount, VaultPreferences } from '../types/vault';
+import { sanitizeAccountPayload } from './vaultHelpers';
 
 export interface LocalUserSession {
   uid: string;
@@ -270,6 +271,14 @@ export async function loginLocalUser(params: {
   return session;
 }
 
+function normalizeLoadedAccounts(accounts: VaultAccount[], uid: string): VaultAccount[] {
+  return accounts.map((acc) => ({
+    ...sanitizeAccountPayload(acc, uid, acc.id),
+    createdAt: acc.createdAt,
+    updatedAt: acc.updatedAt,
+  }));
+}
+
 export async function loadLocalVaultData(
   uid: string,
   fallbackBirthdate: string
@@ -277,12 +286,13 @@ export async function loadLocalVaultData(
   const idbData = await idbGetVault(uid);
   if (idbData && Array.isArray(idbData.accounts)) {
     return {
-      accounts: idbData.accounts,
+      accounts: normalizeLoadedAccounts(idbData.accounts, uid),
       preferences: {
         ownerId: uid,
         realBirthdate: idbData.preferences?.realBirthdate || fallbackBirthdate,
         vaultPinHash: idbData.preferences?.vaultPinHash || '',
         autoLockMinutes: idbData.preferences?.autoLockMinutes ?? 15,
+        clipboardClearSeconds: idbData.preferences?.clipboardClearSeconds ?? 30,
         theme: idbData.preferences?.theme === 'dark' ? 'dark' : 'light',
       },
     };
@@ -294,12 +304,13 @@ export async function loadLocalVaultData(
       const parsed = JSON.parse(raw) as StoredVaultData;
       if (parsed && Array.isArray(parsed.accounts)) {
         return {
-          accounts: parsed.accounts,
+          accounts: normalizeLoadedAccounts(parsed.accounts, uid),
           preferences: {
             ownerId: uid,
             realBirthdate: parsed.preferences?.realBirthdate || fallbackBirthdate,
             vaultPinHash: parsed.preferences?.vaultPinHash || '',
             autoLockMinutes: parsed.preferences?.autoLockMinutes ?? 15,
+            clipboardClearSeconds: parsed.preferences?.clipboardClearSeconds ?? 30,
             theme: parsed.preferences?.theme === 'dark' ? 'dark' : 'light',
           },
         };
@@ -316,6 +327,7 @@ export async function loadLocalVaultData(
       realBirthdate: fallbackBirthdate,
       vaultPinHash: '',
       autoLockMinutes: 15,
+      clipboardClearSeconds: 30,
       theme: localStorage.getItem('khaznati_theme') === 'dark' ? 'dark' : 'light',
     },
   };
